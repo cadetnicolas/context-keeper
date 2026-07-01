@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  context-keeper:
+    build: ./backend
+    container_name: context-keeper
+    ports:
+      - "8000:8000"
+    environment:
+      - CK_DATABASE_URL=sqlite:///data/context_keeper.db
+      - CK_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      - CK_VECTOR_WEIGHT=0.6
+      - CK_BM25_WEIGHT=0.4
+      - CK_MEMORY_STALENESS_DAYS=90
+    volumes:
+      - context-keeper-data:/data
+    restart: unless-stopped
+
+volumes:
+  context-keeper-data:

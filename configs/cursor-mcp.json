@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "contextkeeper": {
+      "command": "python3",
+      "args": [
+        "-m",
+        "app.mcp.server"
+      ],
+      "cwd": "/Users/zhongxing/Desktop/code_project/daily_project_Qoder/context-keeper/backend",
+      "env": {
+        "CK_DATABASE_URL": "sqlite:///~/.context-keeper/context_keeper.db",
+        "CK_EMBEDDING_MODEL": "sentence-transformers/all-MiniLM-L6-v2"
+      }
+    }
+  }
+}
