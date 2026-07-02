@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "context-keeper"
+version = "0.1.0"
+description = "Team memory layer for AI coding agents — MCP plugin for Cursor, Claude Code, Codex"
+readme = "../README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+keywords = ["mcp", "ai", "cursor", "claude-code", "memory", "context"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "fastapi==0.111.0",
+    "uvicorn[standard]==0.30.1",
+    "pydantic==2.7.4",
+    "pydantic-settings==2.3.4",
+    "sqlalchemy==2.0.31",
+    "pgvector==0.2.5",
+    "sentence-transformers==3.0.1",
+    "rank-bm25==0.2.2",
+    "numpy==1.26.4",
+    "python-multipart==0.0.9",
+    "aiofiles==23.2.1",
+    "httpx==0.27.0",
+]
+
+[project.scripts]
+# 主命令：同时启动 MCP stdio + 后台 HTTP 服务
+context-keeper = "app.mcp.server:main"
+# 仅启动 HTTP REST API（可选，用于独立运行 Dashboard）
+context-keeper-serve = "app.cli:serve"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]

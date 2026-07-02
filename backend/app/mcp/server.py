@@ -5,17 +5,63 @@ ContextKeeper MCP Server
   - contextkeeper_recall: 根据当前任务召回相关团队记忆
   - contextkeeper_remember: 将新决策/教训写入团队记忆
 
-启动方式：
+启动方式（自动模式）：
   python -m app.mcp.server
+  → MCP stdio 服务启动，同时后台拉起 HTTP REST API（含 Dashboard）
+
+插件集成说明：
+  Cursor/Claude Code 配置 MCP 后，每次 IDE 启动会自动调用本命令。
+  HTTP 服务默认监听 http://127.0.0.1:8000，Dashboard: http://127.0.0.1:8000/static/index.html
 """
 
 import json
 import sys
+import os
+import threading
+import time
+import socket
 from typing import Any, Dict, List
 
 from app.models import init_db, MemoryType, MemorySource, get_db
 from app.memory.store import MemoryStore
 from app.memory.retrieval import MemoryRetriever, EmbeddingProvider
+
+
+def _is_port_in_use(port: int) -> bool:
+    """检测端口是否已被占用（HTTP 服务是否已启动）"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _start_http_server_in_background(port: int = 8000) -> None:
+    """在后台线程启动 FastAPI HTTP 服务（含 Dashboard）"""
+    if _is_port_in_use(port):
+        # 服务已在运行，无需重复启动
+        return
+
+    def _run():
+        try:
+            import uvicorn
+            from app.main import app as fastapi_app
+            uvicorn.run(
+                fastapi_app,
+                host="127.0.0.1",
+                port=port,
+                log_level="error",    # 静默运行，不污染 MCP stdio
+                access_log=False,
+            )
+        except Exception:
+            pass  # HTTP 服务失败不影响 MCP 功能
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    # 最多等待 5 秒让服务就绪
+    for _ in range(10):
+        if _is_port_in_use(port):
+            break
+        time.sleep(0.5)
 
 
 class MCPStdioTransport:
@@ -37,6 +83,9 @@ class ContextKeeperMCPServer:
     def __init__(self):
         self.transport = MCPStdioTransport()
         init_db()
+        # 自动在后台拉起 HTTP 服务，含 Dashboard
+        http_port = int(os.environ.get("CK_PORT", "8000"))
+        _start_http_server_in_background(http_port)
 
     def run(self):
         # 发送初始化通知

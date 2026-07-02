@@ -1,0 +1,76 @@
+{
+  "name": "context-keeper",
+  "displayName": "ContextKeeper — Team Memory for AI Agents",
+  "description": "Gives Cursor and Claude Code a shared team memory layer. Automatically stores decisions, lessons, and architecture notes so AI agents never forget context.",
+  "version": "0.1.0",
+  "publisher": "cadetnicolas",
+  "icon": "assets/icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Other"],
+  "keywords": ["mcp", "ai", "cursor", "claude", "memory", "context", "team"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cadetnicolas/context-keeper.git"
+  },
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "contextkeeper.openDashboard",
+        "title": "ContextKeeper: Open Dashboard"
+      },
+      {
+        "command": "contextkeeper.restartServer",
+        "title": "ContextKeeper: Restart Server"
+      },
+      {
+        "command": "contextkeeper.showStatus",
+        "title": "ContextKeeper: Show Status"
+      },
+      {
+        "command": "contextkeeper.setupMCP",
+        "title": "ContextKeeper: Setup MCP (re-register)"
+      }
+    ],
+    "configuration": {
+      "title": "ContextKeeper",
+      "properties": {
+        "contextkeeper.port": {
+          "type": "number",
+          "default": 8765,
+          "description": "Port for ContextKeeper HTTP service"
+        },
+        "contextkeeper.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start ContextKeeper service on IDE launch"
+        },
+        "contextkeeper.defaultProjectId": {
+          "type": "string",
+          "default": "default",
+          "description": "Default project identifier used for memory isolation"
+        },
+        "contextkeeper.defaultTeamId": {
+          "type": "string",
+          "default": "default",
+          "description": "Default team identifier"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}

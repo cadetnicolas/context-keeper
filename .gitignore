@@ -34,3 +34,12 @@ Thumbs.db
 
 # Docker volumes
 context-keeper-data/
+
+# Node.js
+extension/node_modules/
+extension/out/
+extension/backend/
+extension/assets/
+
+# Build artifacts
+*.vsix

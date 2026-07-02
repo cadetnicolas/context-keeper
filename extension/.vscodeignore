@@ -1,0 +1,23 @@
+.vscode/**
+.vscode-test/**
+src/**
+.gitignore
+.npmignore
+tsconfig.json
+node_modules/**
+**/*.map
+**/*.ts
+!out/**
+!backend/**
+!assets/**
+# 排除 Python 虚拟环境和缓存（体积太大，插件首次运行时自动安装）
+backend/venv/**
+backend/__pycache__/**
+backend/**/__pycache__/**
+backend/**/*.pyc
+backend/**/*.pyo
+# 排除日志和测试数据库
+backend/*.log
+backend/*.db
+backend/pip_install.log
+backend/server.log

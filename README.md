@@ -4,152 +4,112 @@
 
 让 Cursor、Claude Code、Codex 等 AI 编码工具记住团队决策、踩坑记录、架构规范和项目偏好，告别"每次新会话都要重新解释一遍"的低效循环。
 
-## 核心特性
+## 安装（插件方式）
 
-- **MCP 原生接入**：通过 Model Context Protocol 与 Cursor / Claude Code / Codex 无缝集成。
-- **团队共享记忆**：个人本地 SQLite 或团队 PostgreSQL + pgvector 两种部署模式。
-- **混合召回**：BM25 + 向量相似度融合检索，兼顾关键词精确匹配与语义相似度。
-- **记忆质量管理**：置信度评分、使用频率追踪、陈旧度衰减、人工反馈闭环。
-- **Web Dashboard**：可视化查看、添加、搜索团队记忆。
-- **团队同步**：支持 Git 快照导出/导入，或基于 REST API 的团队同步。
+### 方式一：下载 .vsix 直接安装（推荐）
+
+1. 从 [Releases](https://github.com/cadetnicolas/context-keeper/releases) 下载 `context-keeper-0.1.0.vsix`
+2. 打开 Cursor 命令面板（`Cmd+Shift+P`）
+3. 选择 **Extensions: Install from VSIX…**，选中下载的文件
+4. 重启 Cursor
+
+**安装完成后，扩展会自动：**
+
+- 检测系统 Python 并在 `~/.context-keeper/venv` 创建虚拟环境
+- 安装所有 Python 依赖（首次约需 1-2 分钟）
+- 在 `~/.cursor/mcp.json` 中注册 MCP 服务
+- 在后台启动 HTTP 服务（Dashboard 和 REST API）
+
+状态栏右下角出现 `✓ ContextKeeper` 即表示服务就绪。
+
+### 方式二：从源码构建 .vsix
+
+```bash
+git clone https://github.com/cadetnicolas/context-keeper.git
+cd context-keeper
+bash build.sh
+# 生成 context-keeper-0.1.0.vsix，按方式一安装
+```
+
+## 功能说明
+
+安装完成后，Cursor/Claude Code 的 AI Agent 可自动调用两个工具：
+
+| 工具 | 说明 |
+|------|------|
+| `contextkeeper_recall` | 根据当前任务召回相关团队记忆 |
+| `contextkeeper_remember` | 将决策/教训/规范写入团队记忆 |
+
+**示例对话：**
+
+```
+你：我们怎么处理数据库迁移？
+AI：(自动调用 contextkeeper_recall，找到记忆)
+    根据团队决策：我们统一使用 Alembic 管理迁移，
+    所有迁移脚本需要在 PR 中 review，禁止直接执行原始 SQL。
+```
+
+## 扩展命令
+
+打开命令面板（`Cmd+Shift+P`）可使用：
+
+| 命令 | 说明 |
+|------|------|
+| `ContextKeeper: Open Dashboard` | 打开记忆管理界面 |
+| `ContextKeeper: Restart Server` | 重启后台服务 |
+| `ContextKeeper: Setup MCP (re-register)` | 重新写入 MCP 配置 |
+| `ContextKeeper: Show Status` | 显示运行状态 |
+
+## 扩展设置
+
+在 Cursor 设置中可调整：
+
+| 设置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `contextkeeper.port` | `8765` | HTTP 服务端口 |
+| `contextkeeper.autoStart` | `true` | IDE 启动时自动运行 |
+| `contextkeeper.defaultProjectId` | `default` | 默认项目 ID |
+| `contextkeeper.defaultTeamId` | `default` | 默认团队 ID |
+
+## 记忆类型
+
+| 类型 | 说明 | 示例 |
+|------|------|------|
+| `decision` | 技术决策 | "我们选择 PostgreSQL 而非 MySQL" |
+| `lesson` | 踩坑记录 | "不要直接修改 migrations，必须用 Alembic" |
+| `preference` | 团队偏好 | "统一使用 Black 格式化 Python 代码" |
+| `architecture` | 架构设计 | "所有外部 API 调用封装在 services/ 目录" |
+| `fact` | 项目事实 | "生产环境 PostgreSQL 版本是 15.2" |
+| `todo` | 技术债 | "旧版 UserController 需要重构" |
+
+## 团队共享
+
+默认使用本地 SQLite（`~/.context-keeper/context_keeper.db`）。如需多人共享：
+
+1. 将 `CK_DATABASE_URL` 设置为 PostgreSQL 连接字符串
+2. 或使用 Dashboard 的导出/导入功能同步 JSON 快照
+
+## 系统要求
+
+- Python 3.9+（安装时自动检测）
+- Node.js 不需要（扩展已打包编译好的 JS）
+- 磁盘空间：约 500MB（Python 依赖，首次安装时下载）
 
 ## 项目结构
 
 ```
 context-keeper/
-├── backend/
+├── extension/              ← VS Code / Cursor 扩展
+│   ├── src/extension.ts    ← 扩展核心逻辑（TypeScript）
+│   └── package.json        ← 扩展清单
+├── backend/                ← Python 后端
 │   ├── app/
-│   │   ├── main.py              # FastAPI 主入口
-│   │   ├── config.py            # 配置管理
-│   │   ├── models.py            # SQLAlchemy 数据模型
-│   │   ├── memory/
-│   │   │   ├── store.py         # 记忆 CRUD
-│   │   │   ├── retrieval.py     # BM25 + 向量混合检索
-│   │   │   └── sync.py          # 团队记忆同步
-│   │   ├── mcp/
-│   │   │   └── server.py        # MCP Server（stdio）
-│   │   ├── api/
-│   │   │   └── routes.py        # REST API
-│   │   └── dashboard/
-│   │       └── static/index.html # Web 管理后台
-│   ├── requirements.txt
-│   └── Dockerfile
-├── configs/
-│   ├── cursor-mcp.json          # Cursor MCP 配置示例
-│   └── claude-code-mcp.json     # Claude Code MCP 配置示例
-├── docker-compose.yml
-└── .env.example
+│   │   ├── main.py         ← FastAPI 入口
+│   │   ├── models.py       ← 数据模型
+│   │   ├── memory/         ← 存储 / 检索 / 同步
+│   │   ├── mcp/server.py   ← MCP Server
+│   │   └── api/routes.py   ← REST API
+│   └── requirements.txt
+├── build.sh                ← 一键构建 .vsix
+└── docker-compose.yml      ← 团队服务器部署
 ```
-
-## 快速开始
-
-### 1. 安装依赖
-
-```bash
-cd context-keeper/backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 2. 启动 API 服务
-
-```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-服务启动后访问：
-
-- API 文档：http://127.0.0.1:8000/docs
-- Dashboard：http://127.0.0.1:8000/static/index.html
-
-### 3. 接入 Cursor
-
-打开 Cursor Settings → MCP，添加以下配置：
-
-```json
-{
-  "mcpServers": {
-    "contextkeeper": {
-      "command": "python3",
-      "args": ["-m", "app.mcp.server"],
-      "cwd": "/Users/zhongxing/Desktop/code_project/daily_project_Qoder/context-keeper/backend",
-      "env": {
-        "CK_DATABASE_URL": "sqlite:///~/.context-keeper/context_keeper.db"
-      }
-    }
-  }
-}
-```
-
-Cursor 启动新会话时会自动调用 `contextkeeper_recall` 加载相关记忆，Agent 也可在对话中调用 `contextkeeper_remember` 记录新决策。
-
-### 4. 接入 Claude Code
-
-将 `configs/claude-code-mcp.json` 复制到 Claude Code 配置目录：
-
-```bash
-# macOS
-mkdir -p ~/.claude-code
-cp configs/claude-code-mcp.json ~/.claude-code/mcp-config.json
-```
-
-## 核心工具
-
-### `contextkeeper_recall`
-
-根据当前任务召回相关团队记忆。
-
-输入：
-
-```json
-{
-  "query": "How should we handle database migrations?",
-  "project_id": "default",
-  "team_id": "default",
-  "top_k": 5
-}
-```
-
-### `contextkeeper_remember`
-
-将团队决策或教训写入记忆。
-
-输入：
-
-```json
-{
-  "content": "We decided to use Alembic for all database migrations and never commit raw SQL changes.",
-  "memory_type": "decision",
-  "project_id": "default",
-  "team_id": "default",
-  "tags": ["database", "migration", "alembic"]
-}
-```
-
-## Docker 部署
-
-```bash
-cd context-keeper
-docker-compose up -d
-```
-
-服务将在 http://localhost:8000 启动。
-
-## 环境变量
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `CK_DATABASE_URL` | 数据库连接 URL | SQLite 本地路径 |
-| `CK_EMBEDDING_MODEL` | 嵌入模型名称 | sentence-transformers/all-MiniLM-L6-v2 |
-| `CK_VECTOR_WEIGHT` | 向量检索权重 | 0.6 |
-| `CK_BM25_WEIGHT` | BM25 权重 | 0.4 |
-| `CK_MEMORY_STALENESS_DAYS` | 记忆陈旧阈值 | 90 |
-| `CK_SYNC_MODE` | 同步模式 | none |
-
-## 后续迭代方向
-
-- [ ] 记忆图谱可视化（实体关系网络）
-- [ ] 自动从 Git commit / PR review 提取记忆
-- [ ] 团队权限与审计日志
-- [ ] 与 Linear/Notion/GitHub 的集成
