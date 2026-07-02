@@ -10,85 +10,135 @@ let statusBarItem: vscode.StatusBarItem;
 let serverProcess: cp.ChildProcess | null = null;
 let outputChannel: vscode.OutputChannel;
 
-// 扩展自身所在目录（即 extension/ 目录，打包后为 extension root）
-const EXT_ROOT = path.resolve(__dirname, "..", "..");  // extension/out → extension/ → repo root
-const BACKEND_DIR = path.join(EXT_ROOT, "backend");
+const EXT_ROOT          = path.resolve(__dirname, "..", "..");
+const BACKEND_DIR       = path.join(EXT_ROOT, "backend");
 const PYTHON_REQUIREMENTS = path.join(BACKEND_DIR, "requirements.txt");
-// 虚拟环境统一放在用户 home 目录，命名为 ck-env（ContextKeeper 缩写），便于识别
-const VENV_DIR = path.join(os.homedir(), ".context-keeper", "ck-env");
-const DB_DIR = path.join(os.homedir(), ".context-keeper");
+const VENV_DIR          = path.join(os.homedir(), ".context-keeper", "ck-env");
+const DB_DIR            = path.join(os.homedir(), ".context-keeper");
+// 标记文件：记录已完成安装的 requirements hash，避免重复 pip install
+const INSTALL_STAMP     = path.join(DB_DIR, ".install-stamp");
 
 // ─────────────────────────── 激活入口 ───────────────────────────
 export async function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel("ContextKeeper");
   context.subscriptions.push(outputChannel);
 
-  // 状态栏
-  statusBarItem = vscode.window.createStatusBarItem(
-    vscode.StatusBarAlignment.Right,
-    100
-  );
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBarItem.command = "contextkeeper.showStatus";
-  statusBarItem.text = "$(sync~spin) ContextKeeper";
+  statusBarItem.text    = "$(sync~spin) ContextKeeper";
   statusBarItem.tooltip = "ContextKeeper — Team Memory for AI Agents";
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
-  // 注册命令
   context.subscriptions.push(
     vscode.commands.registerCommand("contextkeeper.openDashboard", openDashboard),
     vscode.commands.registerCommand("contextkeeper.restartServer", () => restartServer(context)),
-    vscode.commands.registerCommand("contextkeeper.showStatus", showStatus),
-    vscode.commands.registerCommand("contextkeeper.setupMCP", () => setupMCP(context))
+    vscode.commands.registerCommand("contextkeeper.showStatus",   showStatus),
+    vscode.commands.registerCommand("contextkeeper.setupMCP",     () => setupMCP(context))
   );
 
   const config = vscode.workspace.getConfiguration("contextkeeper");
   if (config.get<boolean>("autoStart", true)) {
-    // 异步启动，不阻塞 IDE
-    startContextKeeper(context).catch((err) => {
-      log(`Startup error: ${err}`);
-    });
+    startContextKeeper(context).catch((err) => log(`Startup error: ${err}`));
   }
 }
 
-export function deactivate() {
-  stopServer();
-}
+export function deactivate() { stopServer(); }
 
 // ─────────────────────────── 核心启动流程 ───────────────────────────
 async function startContextKeeper(context: vscode.ExtensionContext) {
-  setStatus("$(sync~spin) Installing…", "正在安装 ContextKeeper…");
+  const isFirstInstall = !fs.existsSync(getPythonBin());
+
+  // 首次安装：自动打开日志面板，让用户看到进度
+  if (isFirstInstall) {
+    outputChannel.show(true);
+  }
 
   try {
-    // Step 1: 确保数据目录存在
-    fs.mkdirSync(DB_DIR, { recursive: true });
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title:    "ContextKeeper",
+        cancellable: false,
+      },
+      async (progress) => {
+        fs.mkdirSync(DB_DIR, { recursive: true });
 
-    // Step 2: 检查/创建 Python venv
-    await ensureVenv();
+        // ── Step 1/4：创建 Python 虚拟环境 ──────────────────────────
+        progress.report({ message: "步骤 1/4  创建 Python 虚拟环境…", increment: 0 });
+        setStatus("$(sync~spin) ContextKeeper: 创建虚拟环境…");
+        await ensureVenv();
+        progress.report({ increment: 15 });
 
-    // Step 3: 安装 Python 依赖
-    await installDependencies();
+        // ── Step 2/4：安装 Python 依赖 ───────────────────────────────
+        const needInstall = isFirstInstall || !isInstallUpToDate();
+        if (needInstall) {
+          progress.report({
+            message:   `步骤 2/4  安装依赖包${isFirstInstall ? "（首次约 1-2 分钟）" : ""}…`,
+            increment: 0,
+          });
+          setStatus("$(sync~spin) ContextKeeper: 安装依赖…");
+          log(isFirstInstall
+            ? "首次安装：正在下载 onnxruntime、fastapi 等依赖（约 30MB）…"
+            : "依赖已更新，重新安装中…");
+          await installDependencies(progress);
+          markInstallDone();
+        } else {
+          log("依赖已是最新，跳过安装。");
+          progress.report({ increment: 50 });
+        }
 
-    // Step 4: 启动 MCP + HTTP 服务
-    await startServer(context);
+        // ── Step 3/4：启动服务 ───────────────────────────────────────
+        progress.report({ message: "步骤 3/4  启动 ContextKeeper 服务…", increment: 0 });
+        setStatus("$(sync~spin) ContextKeeper: 启动服务…");
+        await startServer(context);
+        progress.report({ increment: 25 });
 
-    // Step 5: 自动写入 MCP 配置
-    await setupMCP(context, true);
+        // ── Step 4/4：注册 MCP ───────────────────────────────────────
+        progress.report({ message: "步骤 4/4  写入 MCP 配置…", increment: 0 });
+        await setupMCP(context, true);
+        progress.report({ increment: 10 });
+      }
+    );
 
     setStatus("$(check) ContextKeeper", "ContextKeeper 运行中 — 点击查看详情");
     log("ContextKeeper is ready.");
+
+    const port = getPort();
+    const action = await vscode.window.showInformationMessage(
+      "✅ ContextKeeper 已就绪！AI Agent 现在可以调用 contextkeeper_recall 和 contextkeeper_remember。",
+      "打开 Dashboard"
+    );
+    if (action === "打开 Dashboard") {
+      vscode.env.openExternal(vscode.Uri.parse(`http://127.0.0.1:${port}/static/index.html`));
+    }
   } catch (err: any) {
     setStatus("$(error) ContextKeeper", `启动失败: ${err?.message}`);
     log(`Error: ${err?.message}`);
-    vscode.window
-      .showErrorMessage(
-        `ContextKeeper 启动失败: ${err?.message}`,
-        "查看日志"
-      )
-      .then((sel) => {
-        if (sel === "查看日志") outputChannel.show();
-      });
+    const sel = await vscode.window.showErrorMessage(
+      `ContextKeeper 启动失败: ${err?.message}`,
+      "查看日志",
+      "重试"
+    );
+    if (sel === "查看日志") outputChannel.show();
+    if (sel === "重试") startContextKeeper(context);
   }
+}
+
+// ─────────────────────────── 安装检查（跳过重复 pip install）───────────────────────────
+function requirementsHash(): string {
+  try { return fs.readFileSync(PYTHON_REQUIREMENTS, "utf-8"); } catch { return ""; }
+}
+
+function isInstallUpToDate(): boolean {
+  try {
+    const stamp = JSON.parse(fs.readFileSync(INSTALL_STAMP, "utf-8"));
+    return stamp.hash === requirementsHash() && fs.existsSync(getPythonBin());
+  } catch { return false; }
+}
+
+function markInstallDone() {
+  fs.writeFileSync(INSTALL_STAMP, JSON.stringify({ hash: requirementsHash(), ts: Date.now() }));
 }
 
 // ─────────────────────────── Python 环境 ───────────────────────────
@@ -100,78 +150,104 @@ function getPythonBin(): string {
 
 async function ensureVenv(): Promise<void> {
   if (fs.existsSync(getPythonBin())) {
-    log("Virtual environment found, skipping creation.");
+    log("Virtual environment (ck-env) found.");
     return;
   }
-
   const python = await findSystemPython();
-
   if (fs.existsSync(VENV_DIR)) {
-    // 目录存在但 Python 二进制缺失 → venv 损坏，用 --clear 重建
-    log("Virtual environment directory exists but appears broken. Recreating with --clear…");
+    log("ck-env directory exists but binary missing — recreating with --clear…");
     await runCommand(python, ["-m", "venv", "--clear", VENV_DIR], os.homedir());
   } else {
-    log("Creating Python virtual environment…");
+    log(`Creating ck-env at ${VENV_DIR}…`);
     await runCommand(python, ["-m", "venv", VENV_DIR], os.homedir());
   }
-
-  log(`Virtual environment ready at ${VENV_DIR}`);
+  log("ck-env ready.");
 }
 
 async function findSystemPython(): Promise<string> {
-  for (const candidate of ["python3", "python3.11", "python3.10", "python3.9", "python"]) {
+  for (const candidate of ["python3", "python3.12", "python3.11", "python3.10", "python3.9", "python"]) {
     try {
       const result = await runCommandOutput(candidate, ["--version"]);
-      if (result.includes("Python 3")) {
-        log(`Found system Python: ${candidate}`);
-        return candidate;
-      }
-    } catch {
-      /* try next */
-    }
+      if (result.includes("Python 3")) { log(`System Python: ${candidate}`); return candidate; }
+    } catch { /* try next */ }
   }
-  throw new Error(
-    "Python 3.9+ not found. Please install Python from https://python.org"
-  );
+  throw new Error("Python 3.9+ not found. Install from https://python.org");
 }
 
-async function installDependencies(): Promise<void> {
+// 安装依赖，同时实时推送进度（解析 pip 输出）
+async function installDependencies(
+  progress: vscode.Progress<{ message?: string; increment?: number }>
+): Promise<void> {
   const pip = getPythonBin();
-  log("Installing Python dependencies (first run may take 1-2 minutes)…");
-  setStatus("$(sync~spin) Installing deps…");
-  await runCommand(pip, ["-m", "pip", "install", "--quiet", "-r", PYTHON_REQUIREMENTS], BACKEND_DIR);
-  log("Dependencies installed.");
+  const args = ["-m", "pip", "install", "-r", PYTHON_REQUIREMENTS, "--progress-bar", "off"];
+
+  return new Promise((resolve, reject) => {
+    log(`$ ${pip} ${args.join(" ")}`);
+    const proc = cp.spawn(pip, args, {
+      cwd:   BACKEND_DIR,
+      shell: process.platform === "win32",
+    });
+
+    let installedCount = 0;
+    const estimatedTotal = 12; // 估算依赖包数量
+
+    const handleLine = (raw: string) => {
+      const line = raw.trim();
+      if (!line) return;
+      log(line);
+
+      // 解析 pip 输出更新进度
+      if (line.startsWith("Collecting ")) {
+        const pkg = line.replace("Collecting ", "").split(" ")[0];
+        progress.report({ message: `步骤 2/4  下载 ${pkg}…` });
+      } else if (line.startsWith("Downloading ")) {
+        const pkg = line.replace("Downloading ", "").split("-")[0];
+        progress.report({ message: `步骤 2/4  下载 ${pkg}…` });
+      } else if (line.startsWith("Installing collected packages")) {
+        progress.report({ message: "步骤 2/4  正在安装所有包…" });
+      } else if (line.includes("Successfully installed")) {
+        installedCount++;
+        const pct = Math.min(50, Math.round((installedCount / estimatedTotal) * 50));
+        progress.report({ message: "步骤 2/4  安装完成 ✓", increment: pct });
+      } else if (line.startsWith("Requirement already satisfied")) {
+        installedCount++;
+        progress.report({ message: `步骤 2/4  已是最新版本，跳过 (${installedCount}/${estimatedTotal})` });
+      }
+    };
+
+    proc.stdout?.on("data", (d: Buffer) => d.toString().split("\n").forEach(handleLine));
+    proc.stderr?.on("data", (d: Buffer) => d.toString().split("\n").forEach(handleLine));
+
+    proc.on("close", (code) => {
+      if (code === 0) { log("Dependencies installed."); resolve(); }
+      else reject(new Error(`pip install failed (exit code ${code})`));
+    });
+  });
 }
 
 // ─────────────────────────── 服务进程 ───────────────────────────
 async function startServer(context: vscode.ExtensionContext): Promise<void> {
   const port = getPort();
-
-  // 已在运行则跳过
   if (await isServerRunning(port)) {
     log(`Server already running on port ${port}.`);
     return;
   }
-
   stopServer();
 
   const python = getPythonBin();
   const env = {
     ...process.env,
     CK_DATABASE_URL: `sqlite:///${path.join(DB_DIR, "context_keeper.db")}`,
-    CK_PORT: String(port),
-    CK_HOST: "127.0.0.1",
-    PYTHONPATH: BACKEND_DIR,
+    CK_PORT:         String(port),
+    CK_HOST:         "127.0.0.1",
+    PYTHONPATH:      BACKEND_DIR,
   };
 
-  log(`Starting ContextKeeper server on port ${port}…`);
-
+  log(`Starting ContextKeeper on port ${port}…`);
   serverProcess = cp.spawn(python, ["-m", "app.mcp.server"], {
-    cwd: BACKEND_DIR,
+    cwd:      BACKEND_DIR,
     env,
-    // MCP server uses stdio — we pipe stdin/stdout for MCP,
-    // but the HTTP server runs in background thread inside Python
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio:    ["pipe", "pipe", "pipe"],
     detached: false,
   });
 
@@ -179,23 +255,18 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
     const msg = data.toString().trim();
     if (msg) log(`[server] ${msg}`);
   });
-
   serverProcess.on("exit", (code) => {
-    log(`Server exited with code ${code}`);
+    log(`Server exited (code ${code})`);
     serverProcess = null;
-    setStatus("$(error) ContextKeeper", "服务已停止");
+    setStatus("$(error) ContextKeeper", "服务已停止 — 点击查看详情");
   });
 
-  // 等待 HTTP 端口就绪（最多 30 秒）
   await waitForPort(port, 30000);
   log(`HTTP service ready at http://127.0.0.1:${port}`);
 }
 
 function stopServer() {
-  if (serverProcess) {
-    serverProcess.kill();
-    serverProcess = null;
-  }
+  if (serverProcess) { serverProcess.kill(); serverProcess = null; }
 }
 
 async function isServerRunning(port: number): Promise<boolean> {
@@ -214,31 +285,28 @@ async function waitForPort(port: number, timeoutMs: number): Promise<void> {
     if (await isServerRunning(port)) return;
     await sleep(500);
   }
-  throw new Error(`Server did not start within ${timeoutMs / 1000}s`);
+  throw new Error(`Server did not start within ${timeoutMs / 1000}s on port ${port}`);
 }
 
 // ─────────────────────────── MCP 自动注册 ───────────────────────────
 async function setupMCP(context: vscode.ExtensionContext, silent = false): Promise<void> {
-  const port = getPort();
+  const port   = getPort();
   const python = getPythonBin();
   const config = buildMCPConfig(python, port);
   const written: string[] = [];
 
-  // Cursor: ~/.cursor/mcp.json
-  const cursorMCPPath = path.join(os.homedir(), ".cursor", "mcp.json");
-  if (writeMCPConfig(cursorMCPPath, config)) written.push("Cursor");
+  if (writeMCPConfig(path.join(os.homedir(), ".cursor", "mcp.json"), config))
+    written.push("Cursor");
 
-  // Claude Code: ~/.claude.json  or ~/.config/claude/settings.json
-  const claudePaths = [
+  for (const p of [
     path.join(os.homedir(), ".claude.json"),
     path.join(os.homedir(), ".config", "claude", "settings.json"),
-  ];
-  for (const p of claudePaths) {
+  ]) {
     if (writeMCPConfig(p, config, "claude")) written.push("Claude Code");
   }
 
   if (written.length > 0) {
-    log(`MCP configuration written for: ${written.join(", ")}`);
+    log(`MCP config written for: ${written.join(", ")}`);
     if (!silent) {
       vscode.window.showInformationMessage(
         `ContextKeeper MCP 已注册到 ${written.join("、")}。重启 IDE 后生效。`
@@ -250,12 +318,12 @@ async function setupMCP(context: vscode.ExtensionContext, silent = false): Promi
 function buildMCPConfig(pythonBin: string, port: number) {
   return {
     command: pythonBin,
-    args: ["-m", "app.mcp.server"],
-    cwd: BACKEND_DIR,
+    args:    ["-m", "app.mcp.server"],
+    cwd:     BACKEND_DIR,
     env: {
       CK_DATABASE_URL: `sqlite:///${path.join(DB_DIR, "context_keeper.db")}`,
-      CK_PORT: String(port),
-      PYTHONPATH: BACKEND_DIR,
+      CK_PORT:         String(port),
+      PYTHONPATH:      BACKEND_DIR,
     },
   };
 }
@@ -263,44 +331,36 @@ function buildMCPConfig(pythonBin: string, port: number) {
 function writeMCPConfig(filePath: string, serverConfig: object, format = "cursor"): boolean {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-
     let existing: any = {};
     if (fs.existsSync(filePath)) {
       try { existing = JSON.parse(fs.readFileSync(filePath, "utf-8")); } catch { /* ignore */ }
     }
-
-    if (format === "claude") {
-      // Claude Code 格式：{ "mcpServers": { "contextkeeper": {...} } }
-      existing.mcpServers = existing.mcpServers || {};
-      existing.mcpServers.contextkeeper = serverConfig;
-    } else {
-      // Cursor 格式：{ "mcpServers": { "contextkeeper": {...} } }
-      existing.mcpServers = existing.mcpServers || {};
-      existing.mcpServers.contextkeeper = serverConfig;
-    }
-
+    existing.mcpServers = existing.mcpServers || {};
+    existing.mcpServers.contextkeeper = serverConfig;
     fs.writeFileSync(filePath, JSON.stringify(existing, null, 2) + "\n");
     log(`MCP config written: ${filePath}`);
     return true;
   } catch (err: any) {
-    log(`Failed to write MCP config to ${filePath}: ${err?.message}`);
+    log(`Failed to write MCP config ${filePath}: ${err?.message}`);
     return false;
   }
 }
 
 // ─────────────────────────── 命令实现 ───────────────────────────
 function openDashboard() {
-  const port = getPort();
   vscode.env.openExternal(
-    vscode.Uri.parse(`http://127.0.0.1:${port}/static/index.html`)
+    vscode.Uri.parse(`http://127.0.0.1:${getPort()}/static/index.html`)
   );
 }
 
 async function restartServer(context: vscode.ExtensionContext) {
-  setStatus("$(sync~spin) Restarting…");
+  setStatus("$(sync~spin) ContextKeeper: 重启中…");
   stopServer();
   await sleep(500);
-  await startServer(context);
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "ContextKeeper: 重启服务…", cancellable: false },
+    async () => { await startServer(context); }
+  );
   setStatus("$(check) ContextKeeper", "ContextKeeper 运行中");
 }
 
@@ -308,15 +368,16 @@ function showStatus() {
   const port = getPort();
   outputChannel.show();
   vscode.window.showInformationMessage(
-    `ContextKeeper 运行中 | Dashboard: http://127.0.0.1:${port}/static/index.html`
-  );
+    `ContextKeeper 运行中 | Dashboard: http://127.0.0.1:${port}/static/index.html`,
+    "打开 Dashboard"
+  ).then((sel) => {
+    if (sel === "打开 Dashboard") openDashboard();
+  });
 }
 
 // ─────────────────────────── 工具函数 ───────────────────────────
 function getPort(): number {
-  return vscode.workspace
-    .getConfiguration("contextkeeper")
-    .get<number>("port", 8765);
+  return vscode.workspace.getConfiguration("contextkeeper").get<number>("port", 8765);
 }
 
 function setStatus(text: string, tooltip?: string) {
@@ -325,8 +386,7 @@ function setStatus(text: string, tooltip?: string) {
 }
 
 function log(msg: string) {
-  const ts = new Date().toLocaleTimeString();
-  outputChannel.appendLine(`[${ts}] ${msg}`);
+  outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -341,7 +401,7 @@ function runCommand(cmd: string, args: string[], cwd: string): Promise<void> {
     proc.stderr?.on("data", (d: Buffer) => log(d.toString().trim()));
     proc.on("close", (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`Command failed with exit code ${code}: ${cmd} ${args.join(" ")}`));
+      else reject(new Error(`Command failed (exit ${code}): ${cmd} ${args.join(" ")}`));
     });
   });
 }
@@ -349,8 +409,7 @@ function runCommand(cmd: string, args: string[], cwd: string): Promise<void> {
 function runCommandOutput(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     cp.execFile(cmd, args, (err, stdout) => {
-      if (err) reject(err);
-      else resolve(stdout);
+      if (err) reject(err); else resolve(stdout);
     });
   });
 }
