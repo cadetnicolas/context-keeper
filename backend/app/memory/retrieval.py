@@ -1,8 +1,15 @@
+"""
+记忆检索器：BM25 + 向量混合召回 + 陈旧度加权
+
+向量化引擎：onnxruntime（无 PyTorch 依赖）
+模型文件：backend/models/all-MiniLM-L6-v2/（已内置，无需联网下载）
+"""
+
 import json
-import math
 import re
-from typing import List, Dict, Tuple, Optional
-from collections import defaultdict
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List, Dict, Optional
 
 import numpy as np
 from rank_bm25 import BM25Okapi
@@ -11,31 +18,85 @@ from sqlalchemy.orm import Session
 from app.models import Memory, MemoryEmbedding
 from app.config import settings
 
+# 内置模型目录（与 backend/ 同级，打包进插件）
+_MODEL_DIR = Path(__file__).parent.parent.parent / "models" / "all-MiniLM-L6-v2"
+
 
 class EmbeddingProvider:
-    """向量嵌入提供者：本地 sentence-transformers，零外部 API"""
+    """向量嵌入提供者：onnxruntime + 内置模型，完全离线，无需 PyTorch"""
 
     _instance = None
-    _model = None
+    _session = None
+    _tokenizer = None
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def _load_model(self):
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(settings.embedding_model)
-        return self._model
+    def _load(self):
+        """惰性加载模型（仅在第一次调用 embed 时加载，耗时约 0.5s）"""
+        if self._session is not None:
+            return
+
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        model_path = _MODEL_DIR / "model.onnx"
+        tokenizer_path = _MODEL_DIR / "tokenizer.json"
+
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Bundled ONNX model not found at {model_path}. "
+                "Please reinstall the ContextKeeper extension."
+            )
+
+        self._tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=128)
+        self._tokenizer.enable_truncation(max_length=128)
+
+        opts = ort.SessionOptions()
+        opts.log_severity_level = 3          # 静默运行
+        opts.intra_op_num_threads = 2
+        self._session = ort.InferenceSession(
+            str(model_path),
+            sess_options=opts,
+            providers=["CPUExecutionProvider"],
+        )
 
     def embed(self, text: str) -> List[float]:
-        model = self._load_model()
-        return model.encode(text, normalize_embeddings=True).tolist()
+        """生成 384 维归一化向量"""
+        self._load()
+
+        encoded = self._tokenizer.encode(text)
+
+        input_ids       = np.array([encoded.ids],              dtype=np.int64)
+        attention_mask  = np.array([encoded.attention_mask],   dtype=np.int64)
+        token_type_ids  = np.zeros_like(input_ids)
+
+        outputs = self._session.run(
+            None,
+            {
+                "input_ids":      input_ids,
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids,
+            },
+        )
+
+        # Mean pooling（对有效 token 取均值）
+        token_embeddings = outputs[0].astype(np.float32)   # (1, seq, 384)
+        mask = attention_mask[:, :, np.newaxis].astype(np.float32)
+        sum_emb  = (token_embeddings * mask).sum(axis=1)
+        sum_mask = mask.sum(axis=1).clip(min=1e-9)
+        mean_emb = sum_emb / sum_mask                       # (1, 384)
+
+        # L2 归一化
+        norm = np.linalg.norm(mean_emb, axis=1, keepdims=True).clip(min=1e-9)
+        return (mean_emb / norm)[0].tolist()
 
     @property
     def model_name(self) -> str:
-        return settings.embedding_model
+        return "all-MiniLM-L6-v2-onnx"
 
 
 class MemoryRetriever:
@@ -54,43 +115,34 @@ class MemoryRetriever:
         memory_type: Optional[str] = None,
     ) -> List[Dict]:
         """混合召回检索"""
-        # 1. 拉取候选记忆
         candidates = self._get_candidates(project_id, team_id, memory_type)
         if not candidates:
             return []
 
-        # 2. BM25 打分
-        bm25_scores = self._bm25_score(query, candidates)
-
-        # 3. 向量相似度打分
+        bm25_scores   = self._bm25_score(query, candidates)
         vector_scores = self._vector_score(query, candidates)
 
-        # 4. 融合、去噪、按综合分排序
         combined: Dict[int, Dict] = {}
         for mem in candidates:
             bm25 = bm25_scores.get(mem.id, 0.0)
-            vec = vector_scores.get(mem.id, 0.0)
+            vec  = vector_scores.get(mem.id, 0.0)
 
-            # 归一化到 0-1（BM25 本身已较稳定，向量余弦在 0-1）
             bm25_norm = min(1.0, bm25 / 10.0) if bm25 > 0 else 0.0
-            vec_norm = max(0.0, vec)  # 已 normalize，直接截断
+            vec_norm  = max(0.0, vec)
 
             final_score = (
                 settings.bm25_weight * bm25_norm
                 + settings.vector_weight * vec_norm
             )
-
-            # 陈旧度惩罚：超过 staleness_days 后线性衰减，最多衰减 30%
             final_score = self._apply_staleness_penalty(mem, final_score)
 
             combined[mem.id] = {
-                "memory": mem,
-                "bm25_score": round(bm25_norm, 4),
-                "vector_score": round(vec_norm, 4),
-                "final_score": round(final_score, 4),
+                "memory":       mem,
+                "bm25_score":   round(bm25_norm, 4),
+                "vector_score": round(vec_norm,   4),
+                "final_score":  round(final_score, 4),
             }
 
-        # 5. 排序并返回
         sorted_results = sorted(
             combined.values(),
             key=lambda x: x["final_score"],
@@ -101,9 +153,9 @@ class MemoryRetriever:
             {
                 **r["memory"].to_dict(),
                 "scores": {
-                    "bm25": r["bm25_score"],
+                    "bm25":   r["bm25_score"],
                     "vector": r["vector_score"],
-                    "final": r["final_score"],
+                    "final":  r["final_score"],
                 },
             }
             for r in sorted_results
@@ -115,7 +167,6 @@ class MemoryRetriever:
         team_id: str,
         memory_type: Optional[str] = None,
     ) -> List[Memory]:
-        """获取候选记忆：优先最近 200 条，兼顾长期高频记忆"""
         query = self.db.query(Memory).filter(
             Memory.project_id == project_id,
             Memory.team_id == team_id,
@@ -124,58 +175,37 @@ class MemoryRetriever:
             query = query.filter(Memory.memory_type == memory_type)
 
         recent = (
-            query.order_by(Memory.updated_at.desc())
-            .limit(150)
-            .all()
+            query.order_by(Memory.updated_at.desc()).limit(150).all()
         )
-
-        # 补充高频长期记忆
         hot = (
             self.db.query(Memory)
-            .filter(
-                Memory.project_id == project_id,
-                Memory.team_id == team_id,
-            )
+            .filter(Memory.project_id == project_id, Memory.team_id == team_id)
             .order_by(Memory.usage_count.desc())
             .limit(50)
             .all()
         )
 
-        seen = set()
-        candidates = []
+        seen, candidates = set(), []
         for mem in recent + hot:
             if mem.id not in seen:
                 seen.add(mem.id)
                 candidates.append(mem)
         return candidates
 
-    def _bm25_score(
-        self,
-        query: str,
-        memories: List[Memory],
-    ) -> Dict[int, float]:
-        """基于记忆内容的 BM25 打分"""
+    def _bm25_score(self, query: str, memories: List[Memory]) -> Dict[int, float]:
         if not memories:
             return {}
-
-        tokenized_corpus = [self._tokenize(m.content) for m in memories]
-        bm25 = BM25Okapi(tokenized_corpus)
-        tokenized_query = self._tokenize(query)
-        scores = bm25.get_scores(tokenized_query)
-
+        corpus = [self._tokenize(m.content) for m in memories]
+        bm25   = BM25Okapi(corpus)
+        scores = bm25.get_scores(self._tokenize(query))
         return {memories[i].id: float(scores[i]) for i in range(len(memories))}
 
-    def _vector_score(
-        self,
-        query: str,
-        memories: List[Memory],
-    ) -> Dict[int, float]:
-        """基于预计算嵌入的向量相似度打分"""
+    def _vector_score(self, query: str, memories: List[Memory]) -> Dict[int, float]:
         if not memories:
             return {}
 
         query_vec = np.array(self.embedder.embed(query))
-        results = {}
+        results   = {}
 
         memory_ids = [m.id for m in memories]
         embeddings = (
@@ -183,43 +213,31 @@ class MemoryRetriever:
             .filter(MemoryEmbedding.memory_id.in_(memory_ids))
             .all()
         )
-
         emb_map = {e.memory_id: e for e in embeddings}
 
         for mem in memories:
-            emb_record = emb_map.get(mem.id)
-            if not emb_record or not emb_record.embedding_json:
-                # 无嵌入时给 0 分，但允许 BM25 召回
+            rec = emb_map.get(mem.id)
+            if not rec or not rec.embedding_json:
                 results[mem.id] = 0.0
                 continue
-
-            mem_vec = np.array(json.loads(emb_record.embedding_json))
-            similarity = float(np.dot(query_vec, mem_vec))
-            results[mem.id] = similarity
+            mem_vec    = np.array(json.loads(rec.embedding_json))
+            results[mem.id] = float(np.dot(query_vec, mem_vec))
 
         return results
 
     def _apply_staleness_penalty(self, memory: Memory, score: float) -> float:
-        """陈旧度惩罚：超过阈值后每多一天衰减少量"""
-        from datetime import datetime, timedelta
-
         days = settings.memory_staleness_days
-        age = (datetime.utcnow() - memory.updated_at).days
+        age  = (datetime.utcnow() - memory.updated_at).days
         if age <= days:
             return score
-
-        excess_days = age - days
-        penalty = min(0.3, excess_days * 0.005)  # 最多衰减 30%
+        penalty = min(0.3, (age - days) * 0.005)
         return score * (1 - penalty)
 
     def _tokenize(self, text: str) -> List[str]:
-        """轻量英文分词 + 小写 + 去标"""
         text = re.sub(r"[^a-zA-Z0-9_\s]", " ", text)
-        tokens = [t.lower() for t in text.split() if len(t) > 1]
-        return tokens
+        return [t.lower() for t in text.split() if len(t) > 1]
 
     def refresh_embedding(self, memory_id: int) -> bool:
-        """为单条记忆重新生成嵌入"""
         memory = self.db.query(Memory).filter(Memory.id == memory_id).first()
         if not memory:
             return False
@@ -233,14 +251,13 @@ class MemoryRetriever:
         embedding = self.embedder.embed(memory.content)
         if existing:
             existing.embedding_json = json.dumps(embedding)
-            existing.model_name = self.embedder.model_name
+            existing.model_name     = self.embedder.model_name
         else:
-            new_emb = MemoryEmbedding(
-                memory_id=memory_id,
-                model_name=self.embedder.model_name,
-                embedding_json=json.dumps(embedding),
-            )
-            self.db.add(new_emb)
+            self.db.add(MemoryEmbedding(
+                memory_id      = memory_id,
+                model_name     = self.embedder.model_name,
+                embedding_json = json.dumps(embedding),
+            ))
 
         self.db.commit()
         return True

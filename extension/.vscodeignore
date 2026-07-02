@@ -21,3 +21,5 @@ backend/*.log
 backend/*.db
 backend/pip_install.log
 backend/server.log
+# 确保 ONNX 模型文件被打包（内置模型，离线推理所需）
+!backend/models/**
