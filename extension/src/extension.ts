@@ -14,8 +14,8 @@ let outputChannel: vscode.OutputChannel;
 const EXT_ROOT = path.resolve(__dirname, "..", "..");  // extension/out → extension/ → repo root
 const BACKEND_DIR = path.join(EXT_ROOT, "backend");
 const PYTHON_REQUIREMENTS = path.join(BACKEND_DIR, "requirements.txt");
-// 虚拟环境统一放在用户 home 目录，所有项目共享
-const VENV_DIR = path.join(os.homedir(), ".context-keeper", "venv");
+// 虚拟环境统一放在用户 home 目录，命名为 ck-env（ContextKeeper 缩写），便于识别
+const VENV_DIR = path.join(os.homedir(), ".context-keeper", "ck-env");
 const DB_DIR = path.join(os.homedir(), ".context-keeper");
 
 // ─────────────────────────── 激活入口 ───────────────────────────
@@ -103,10 +103,19 @@ async function ensureVenv(): Promise<void> {
     log("Virtual environment found, skipping creation.");
     return;
   }
-  log("Creating Python virtual environment…");
+
   const python = await findSystemPython();
-  await runCommand(python, ["-m", "venv", VENV_DIR], os.homedir());
-  log(`Virtual environment created at ${VENV_DIR}`);
+
+  if (fs.existsSync(VENV_DIR)) {
+    // 目录存在但 Python 二进制缺失 → venv 损坏，用 --clear 重建
+    log("Virtual environment directory exists but appears broken. Recreating with --clear…");
+    await runCommand(python, ["-m", "venv", "--clear", VENV_DIR], os.homedir());
+  } else {
+    log("Creating Python virtual environment…");
+    await runCommand(python, ["-m", "venv", VENV_DIR], os.homedir());
+  }
+
+  log(`Virtual environment ready at ${VENV_DIR}`);
 }
 
 async function findSystemPython(): Promise<string> {
