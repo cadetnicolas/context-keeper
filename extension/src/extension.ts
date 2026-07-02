@@ -73,14 +73,17 @@ async function startContextKeeper(context: vscode.ExtensionContext) {
         // ── Step 2/4：安装 Python 依赖 ───────────────────────────────
         const needInstall = isFirstInstall || !isInstallUpToDate();
         if (needInstall) {
+          const mirror = resolvePipMirror();
+          const mHost = mirror ? (() => { try { return new URL(mirror).hostname; } catch { return mirror; } })() : null;
+          const mNote = mHost ? ` — ${mHost}` : " — PyPI";
           progress.report({
-            message:   `步骤 2/4  安装依赖包${isFirstInstall ? "（首次约 1-2 分钟）" : ""}…`,
+            message:   `步骤 2/4  安装依赖包${isFirstInstall ? `（首次${mNote}）` : ""}…`,
             increment: 0,
           });
           setStatus("$(sync~spin) ContextKeeper: 安装依赖…");
-          log(isFirstInstall
-            ? "首次安装：正在下载 onnxruntime、fastapi 等依赖（约 30MB）…"
-            : "依赖已更新，重新安装中…");
+          log(mHost
+            ? `首次安装：使用 ${mirror} 加速下载（onnxruntime、fastapi 等）…`
+            : `首次安装：从 PyPI 下载依赖。如在中国大陆可设置 contextkeeper.pipMirror 加速。`);
           await installDependencies(progress);
           markInstallDone();
         } else {
@@ -174,12 +177,61 @@ async function findSystemPython(): Promise<string> {
   throw new Error("Python 3.9+ not found. Install from https://python.org");
 }
 
+// ─────────────────────────── 镜像源检测 ───────────────────────────
+/**
+ * 根据系统时区判断是否在中国大陆/港台地区
+ * 优先用清华源（每秒 30-50MB，比 PyPI 快 20-50 倍）
+ */
+function isChineseTimezone(): boolean {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return [
+      "Asia/Shanghai", "Asia/Chongqing", "Asia/Harbin",
+      "Asia/Urumqi",   "Asia/Taipei",    "Asia/Hong_Kong",
+      "Asia/Macau",
+    ].some((z) => tz === z || tz.startsWith(z));
+  } catch { return false; }
+}
+
+/** 返回 pip 应使用的镜像 URL（undefined = 使用 pip 默认 PyPI）*/
+function resolvePipMirror(): string | undefined {
+  const cfg = vscode.workspace.getConfiguration("contextkeeper");
+  const setting = cfg.get<string>("pipMirror", "auto").trim();
+
+  if (setting === "off" || setting === "") return undefined;
+  if (setting !== "auto") return setting;   // 用户手动指定
+
+  // auto: 按时区自动选择
+  return isChineseTimezone()
+    ? "https://pypi.tuna.tsinghua.edu.cn/simple"
+    : undefined;
+}
+
 // 安装依赖，同时实时推送进度（解析 pip 输出）
 async function installDependencies(
   progress: vscode.Progress<{ message?: string; increment?: number }>
 ): Promise<void> {
-  const pip = getPythonBin();
-  const args = ["-m", "pip", "install", "-r", PYTHON_REQUIREMENTS, "--progress-bar", "off"];
+  const pip    = getPythonBin();
+  const mirror = resolvePipMirror();
+
+  const args: string[] = [
+    "-m", "pip", "install",
+    "-r", PYTHON_REQUIREMENTS,
+    "--progress-bar", "off",
+  ];
+
+  if (mirror) {
+    // 主镜像 + 备用镜像（pip 会按顺序尝试）
+    args.push("-i", mirror);
+    try {
+      args.push("--trusted-host", new URL(mirror).hostname);
+    } catch { /* ignore */ }
+    log(`📦 使用 pip 镜像加速: ${mirror}`);
+    progress.report({ message: `步骤 2/4  安装依赖 (${new URL(mirror).hostname})…` });
+  } else {
+    log("📦 使用默认 pip 源 (PyPI)");
+    progress.report({ message: "步骤 2/4  安装依赖 (PyPI)…" });
+  }
 
   return new Promise((resolve, reject) => {
     log(`$ ${pip} ${args.join(" ")}`);
@@ -189,29 +241,33 @@ async function installDependencies(
     });
 
     let installedCount = 0;
-    const estimatedTotal = 12; // 估算依赖包数量
+    const estimatedTotal = 12;
 
     const handleLine = (raw: string) => {
       const line = raw.trim();
       if (!line) return;
       log(line);
 
-      // 解析 pip 输出更新进度
       if (line.startsWith("Collecting ")) {
-        const pkg = line.replace("Collecting ", "").split(" ")[0];
-        progress.report({ message: `步骤 2/4  下载 ${pkg}…` });
+        const pkg = line.replace("Collecting ", "").split(" ")[0].split(";")[0];
+        progress.report({ message: `步骤 2/4  解析 ${pkg}…` });
       } else if (line.startsWith("Downloading ")) {
-        const pkg = line.replace("Downloading ", "").split("-")[0];
+        const pkg = path.basename(line.replace("Downloading ", "").split(" ")[0]);
         progress.report({ message: `步骤 2/4  下载 ${pkg}…` });
       } else if (line.startsWith("Installing collected packages")) {
-        progress.report({ message: "步骤 2/4  正在安装所有包…" });
+        progress.report({ message: "步骤 2/4  安装包到虚拟环境…" });
       } else if (line.includes("Successfully installed")) {
-        installedCount++;
-        const pct = Math.min(50, Math.round((installedCount / estimatedTotal) * 50));
-        progress.report({ message: "步骤 2/4  安装完成 ✓", increment: pct });
+        const pkgs = line.replace("Successfully installed", "").trim();
+        progress.report({ message: `步骤 2/4  安装完成 ✓`, increment: 50 });
+        log(`已安装: ${pkgs}`);
       } else if (line.startsWith("Requirement already satisfied")) {
         installedCount++;
-        progress.report({ message: `步骤 2/4  已是最新版本，跳过 (${installedCount}/${estimatedTotal})` });
+        if (installedCount <= estimatedTotal) {
+          progress.report({ increment: Math.floor(50 / estimatedTotal) });
+        }
+      } else if (line.toLowerCase().includes("error") || line.toLowerCase().includes("failed")) {
+        // 高亮错误
+        log(`⚠️  ${line}`);
       }
     };
 
@@ -219,8 +275,13 @@ async function installDependencies(
     proc.stderr?.on("data", (d: Buffer) => d.toString().split("\n").forEach(handleLine));
 
     proc.on("close", (code) => {
-      if (code === 0) { log("Dependencies installed."); resolve(); }
-      else reject(new Error(`pip install failed (exit code ${code})`));
+      if (code === 0) { log("✅ 依赖安装完成。"); resolve(); }
+      else {
+        const hint = mirror
+          ? `pip install 失败（exit ${code}）。镜像: ${mirror}`
+          : `pip install 失败（exit ${code}）。可在设置中配置 contextkeeper.pipMirror 使用国内镜像。`;
+        reject(new Error(hint));
+      }
     });
   });
 }
