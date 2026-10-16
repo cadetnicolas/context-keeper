@@ -1,0 +1,4 @@
+interface:
+  display_name: "ContextKeeper"
+  short_description: "保存任务进度、恢复跨 Agent 上下文并沉淀项目协作经验"
+  default_prompt: "使用 $context-keeper 保存当前项目的任务进度，准备交接给另一个 Agent。"

@@ -1,48 +1,6 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-env/
-ENV/
-.venv
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
-# Logs
-*.log
-server.log
-pip_install.log
-
-# Environment
-.env
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
+dist/
+.context-keeper/
+.agent-tools/
 .DS_Store
-Thumbs.db
-
-# Docker volumes
-context-keeper-data/
-
-# Node.js
-extension/node_modules/
-extension/out/
-extension/backend/
-extension/assets/
-
-# Build artifacts
-*.vsix
-
-# ONNX 模型文件（体积过大，通过 build.sh 构建时拷贝）
-backend/models/

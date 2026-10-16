@@ -1,0 +1,25 @@
+{
+  "idempotency_key": "replace-with-a-new-save-key",
+  "expected_revision": 0,
+  "title": "Task title",
+  "goal": "The user's original desired outcome",
+  "acceptance_criteria": [],
+  "constraints": [],
+  "decisions": [],
+  "attempts": [],
+  "done": [],
+  "pending": [],
+  "blocked": [],
+  "unknowns": [],
+  "next_actions": [],
+  "artifact_paths": [],
+  "checks": [],
+  "evidence": [],
+  "experience_refs": [],
+  "capture": {
+    "mode": "agent_submitted",
+    "limitations": ["Only the source agent's visible context was summarized."]
+  },
+  "status": "active",
+  "result": ""
+}
