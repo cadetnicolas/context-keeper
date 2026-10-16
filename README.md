@@ -8,15 +8,17 @@ ContextKeeper 使用 Agent 自身的总结能力，把目标、决策、已完�
 
 把 [INSTALL.md](INSTALL.md) 的 GitHub 链接交给编码 Agent，并说：
 
-> 请按此安装说明，将 ContextKeeper 安装到当前项目，验证安装结果，并告诉我如何保存和恢复进度。
+> 请按此安装说明，将 ContextKeeper 安装到当前 Agent 的用户级 Skill 目录，验证安装结果，并告诉我如何保存和恢复进度。
 
 也可以克隆仓库后手动运行：
 
 ```bash
-python3 skills/context-keeper/install.py --project /absolute/path/to/project
+python3 skills/context-keeper/install.py --dest /actual/agent/user/skills/context-keeper
 ```
 
-随后让 Agent 读取目标项目中的 `.agent-tools/context-keeper/AGENT.md`。支持原生 Skill 发现的宿主，可使用 `--dest /actual/host/skills/context-keeper` 安装到其实际发现目录。
+安装目录应使用当前宿主实际支持的用户级 Skill 目录；Codex 可直接使用 `--codex`。安装一次供多个项目复用，运行时用 `--workspace /absolute/path/to/project` 指定项目。各项目的总结与经验保存在自己的 `.context-keeper/` 中。
+
+不支持原生 Skill 发现的宿主，可显式读取安装目录中的 `AGENT.md`。`--project` 仅用于可选的项目内便携部署。
 
 ## 保存与接续
 

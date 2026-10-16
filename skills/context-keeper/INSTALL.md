@@ -2,7 +2,17 @@
 
 能力包遵循公开 Agent Skills 文件格式；支持该格式的宿主可以直接加载 SKILL.md。其他具备文件读取和本地 Python 执行能力的 Agent 可从 AGENT.md 使用相同流程。各宿主的发现目录、权限和触发方式不同，不承诺放到任意目录就会自动加载。
 
-## 推荐：安装到项目内
+## 推荐：安装到 Agent 用户级 Skill 目录
+
+能力包安装一次供多个项目复用，使用宿主实际支持的用户级 Skill 目录：
+
+```bash
+python3 /path/to/context-keeper/install.py --dest /actual/agent/user/skills/context-keeper
+```
+
+Codex 可使用下文的 `--codex`。各项目的总结、任务与经验保存在自己的 `.context-keeper/`，不会写入 Skill 安装目录。运行时用 `--workspace /absolute/path/to/project` 指定项目。
+
+## 可选：项目内便携部署
 
 将能力包下载或解压后，运行（把路径换成你的项目）：
 
