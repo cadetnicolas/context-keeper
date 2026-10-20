@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ContextKeeper 0.4.0: skill-first project continuity, no server or third-party packages."""
+"""ContextKeeper 0.5.0: skill-first project continuity, no server or third-party packages."""
 import argparse
 import json
 import os
@@ -168,12 +168,11 @@ class Keeper:
             if not path.exists():
                 atomic_write(path, {"schema_version": SCHEMA, "project_id": project_id or str(uuid4()), "name": redact(name or self.root.name),
                                     "created_at": now(), "version": VERSION})
-            ignore = self.path(".gitignore")
-            if not ignore.exists():
-                atomic_write(ignore, "# Local conversation data: share selected files deliberately.\n*\n!.gitignore\n")
+            from _shared import enable
+            enable(self)
             self.reindex()
             return {**self.project(), "workspace": str(self.root), "data_directory": str(self.directory),
-                    "runtime": "stdlib_only", "sharing": "local_by_default"}
+                    "runtime": "stdlib_only", "sharing": "project_identity_in_git; memories_local_until_share"}
 
     def meta(self, category, item_id):
         identity(item_id)
@@ -224,7 +223,8 @@ class Keeper:
             return {"initialized": False, "workspace": str(self.root), "next": "init"}
         project = self.project()
         from _merge import pending
-        return {"pending_merges": pending(self), "initialized": True, "version": VERSION, "project": project, "index": str(self.path("INDEX.md")),
+        from _shared import inspect as shared_status
+        return {"shared": shared_status(self), "pending_merges": pending(self), "initialized": True, "version": VERSION, "project": project, "index": str(self.path("INDEX.md")),
                 "tasks": [{"id": item["task_id"], "title": item["state"]["title"], "revision": item["revision"],
                            "status": item["state"]["status"], "handoff": str(self.path("tasks", item["task_id"], "HANDOFF.md"))}
                           for item in self.entries("tasks")],
@@ -304,6 +304,8 @@ class Keeper:
         with lock(self.directory):
             from _merge import ensure_ready
             ensure_ready(self)
+            from _shared import enable
+            enable(self)
             prior = self.find_request("tasks", task_id, data["idempotency_key"], request_hash)
             if prior:
                 return self.saved(self.recover_retry("tasks", task_id, prior), retry=True)
@@ -356,7 +358,12 @@ class Keeper:
         record = self.record("tasks", task_id, revision)
         current = self.inspect()
         mismatches = []
-        for key in ("project_id", "mode", "branch", "commit", "changes_sha256"):
+        compared = ("project_id", "mode", "branch", "changes_sha256")
+        if record["workspace"].get("code_tree") and current.get("code_tree"):
+            compared += ("code_tree",)
+        else:
+            compared += ("commit",)  # Legacy checkpoints retain conservative commit comparison.
+        for key in compared:
             if record["workspace"].get(key) != current.get(key):
                 mismatches.append({"field": key, "expected": record["workspace"].get(key), "actual": current.get(key)})
         missing = []
@@ -390,6 +397,13 @@ class Keeper:
         from _merge import pending
         if record.get("merge"):
             mismatches.append({"field": "merged_context", "note": "Reconcile parallel work, then save a new checkpoint after checking code."})
+        from _shared import inspect as shared_status
+        refs = {ref["id"] for ref in record["state"]["experience_refs"]}
+        outstanding = [row for row in shared_status(self)["entities"] if row["outstanding"] and
+                       ((row["category"] == "tasks" and row["id"] == task_id) or
+                        (row["category"] == "experiences" and row["id"] in refs))]
+        if outstanding:
+            mismatches.append({"field": "shared_context_pending", "entities": outstanding, "next": "sync"})
         if pending(self):
             mismatches.append({"field": "pending_merge", "plans": pending(self)})
         limited = current["mode"] != "git" or current["limitations"] or record["workspace"]["limitations"]
@@ -410,6 +424,8 @@ class Keeper:
         with lock(self.directory):
             from _merge import ensure_ready
             ensure_ready(self)
+            from _shared import enable
+            enable(self)
             prior = self.find_request("experiences", experience_id, data["idempotency_key"], request_hash)
             if prior:
                 return self.recover_retry("experiences", experience_id, prior)
@@ -442,6 +458,8 @@ class Keeper:
         with lock(self.directory):
             from _merge import ensure_ready
             ensure_ready(self)
+            from _shared import enable
+            enable(self)
             previous = self.record("experiences", experience_id)
             if previous["revision"] != expected_version:
                 raise Error("Experience version changed; reload before updating its state.")
@@ -461,14 +479,29 @@ class Keeper:
                 terms.update(run[index:index + 2] for index in range(max(1, len(run) - 1)))
             return terms
         terms = tokens(query)
+        from _shared import inspect as shared_status
+        disputed = {row["id"] for row in shared_status(self)["entities"]
+                    if row["category"] == "experiences" and row["outstanding"]}
         results = []
         for item in self.entries("experiences"):
-            if item["status"] != "active" or (item["scope"] == "task" and item["task_id"] != task_id):
+            if item["id"] in disputed or item["status"] != "active" or (item["scope"] == "task" and item["task_id"] != task_id):
                 continue
             score = len(terms & tokens(item["content"] + " " + item["conditions"]))
             if score or item["kind"] == "preference" or not query:
                 results.append({**item, "score": score, "why": "active scoped preference" if item["kind"] == "preference" else "active scope + lexical overlap"})
         return sorted(results, key=lambda item: (item["kind"] == "preference", item["score"]), reverse=True)[:limit]
+
+    def new_task(self, title, goal, request_id=None):
+        return self.save({"idempotency_key": request_id or str(uuid4()), "expected_revision": 0,
+                          "title": title, "goal": goal})
+
+    def share(self, task_id=None, all_tasks=False):
+        from _shared import share
+        return share(self, task_id, all_tasks)
+
+    def sync(self, apply=False, expected_plan=None, resolutions=None):
+        from _shared import sync
+        return sync(self, apply, expected_plan, resolutions)
 
     def merge(self, source, apply=False, expected_plan=None, resolutions=None):
         from _merge import merge
@@ -543,7 +576,7 @@ class Keeper:
 
 
 def parser():
-    root = argparse.ArgumentParser(description="ContextKeeper 0.4.0 · Skill + project files; no server")
+    root = argparse.ArgumentParser(description="ContextKeeper 0.5.0 · Skill + project files; no server")
     root.add_argument("--workspace", default=".", help="Workspace (Git root is detected)")
     root.add_argument("--version", action="version", version=VERSION)
     commands = root.add_subparsers(dest="command", required=True)
@@ -552,6 +585,18 @@ def parser():
     initialize.add_argument("--project-id", help="Shared project UUID, set before parallel work")
     commands.add_parser("status")
     commands.add_parser("inspect")
+    new_task = commands.add_parser("new-task")
+    new_task.add_argument("--title", required=True)
+    new_task.add_argument("--goal", required=True)
+    new_task.add_argument("--request-id", help="Reuse one unique request ID for retries only")
+    share = commands.add_parser("share")
+    share_selection = share.add_mutually_exclusive_group(required=True)
+    share_selection.add_argument("--task")
+    share_selection.add_argument("--all", action="store_true")
+    sync = commands.add_parser("sync")
+    sync.add_argument("--apply", action="store_true")
+    sync.add_argument("--plan")
+    sync.add_argument("--resolutions", help="Conflict resolution JSON, same format as merge")
     for name in ("save", "remember"):
         command = commands.add_parser(name)
         command.add_argument("--input", required=True, help="JSON file, or - for stdin")
@@ -591,6 +636,13 @@ def main(argv=None):
             result = keeper.init(args.name, args.project_id)
         elif args.command == "status":
             result = keeper.status()
+        elif args.command == "new-task":
+            result = keeper.new_task(args.title, args.goal, args.request_id)
+        elif args.command == "share":
+            result = keeper.share(args.task, args.all)
+        elif args.command == "sync":
+            resolutions = read_json(args.resolutions) if args.resolutions else None
+            result = keeper.sync(args.apply, args.plan, resolutions)
         elif args.command == "inspect":
             result = keeper.inspect()
         elif args.command in ("save", "remember"):

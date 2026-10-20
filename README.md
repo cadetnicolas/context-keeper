@@ -28,20 +28,30 @@ python3 skills/context-keeper/install.py --dest /actual/agent/user/skills/contex
 
 Skill 能力包与项目记忆分开存储。安装不启动服务、不修改宿主配置；工作区核对只验证文件状态，不能保证模型已经理解全部背景。
 
-## 多人并行开发：上下文合并
+## 项目记忆随 Git 协作
 
-团队先约定同一项目 UUID（`init --project-id UUID`），不同工作使用独立任务 ID。每个 Agent 使用自己的项目上下文，通过 ZIP 交换任务或整个项目的记录：
+项目首次 `init` 自动生成 UUID，将 `.context-keeper/project.json` 和生成的忽略规则提交到仓库。队友克隆后直接沿用这个身份，无需再约定或输入 UUID。Skill 仍安装在每个 Agent 上。
 
 ```bash
-python3 /installed/context-keeper/scripts/ck.py --workspace /bob/project export --all --output /tmp/bob-context.zip
-python3 /installed/context-keeper/scripts/ck.py --workspace /alice/project merge --source /tmp/bob-context.zip
-# 审阅预览结果，填入返回的 plan；有冲突时还需 --resolutions FILE.json
-python3 /installed/context-keeper/scripts/ck.py --workspace /alice/project merge --source /tmp/bob-context.zip --apply --plan PLAN
+# 首次初始化；之后审阅并提交项目身份和忽略规则
+python3 /installed/context-keeper/scripts/ck.py --workspace /project init
+
+# 新工作自动分配任务 ID；继续已有工作时沿用原 ID
+python3 /installed/context-keeper/scripts/ck.py --workspace /project new-task --title "登录接口" --goal "实现兼容的登录接口"
+
+# 正常保存是本地草稿；明确分享后，记忆文件才成为 Git 提交候选
+python3 /installed/context-keeper/scripts/ck.py --workspace /project share --task TASK_ID
+
+# 队友拉取代码后：预览并应用共享记忆；重复到 up_to_date
+python3 /installed/context-keeper/scripts/ck.py --workspace /project sync
+python3 /installed/context-keeper/scripts/ck.py --workspace /project sync --apply --plan PLAN
 ```
 
-独立任务保留各自记录，同一任务基于共同祖先合并字段；双方对同一字段的不同修改需明确选择。原始历史保留，合并结果不会被当作已验证的代码或测试结果。内容存在分叉合并的经验重新成为待确认提案。
+共享记录按内容哈希命名，双方写出同一个检查点版本号也不会覆盖文件。`sync` 基于历史合并上下文，同字段冲突需明确解决；冲突参数见[合并说明](skills/context-keeper/references/merge.md)。代码合并和测试仍需正常完成。
 
-查看[团队合并与冲突处理](skills/context-keeper/references/merge.md)，了解共享项目身份、证据分组、重复合并、中断恢复及跨任务语义冲突的边界。
+共享记忆与本地状态分开：项目 UUID、显式发布的任务和经验随 Git 流转，私有草稿、锁和恢复事务留在本地。工具不会自动执行 Git 提交或推送。ZIP 保留为离线交接和选择性分享方式。
+
+完整流程见[项目记忆与 Git 协作](skills/context-keeper/references/git-sharing.md)，包括任务 ID、旧记录兼容、并行分叉、隐私和中断恢复。
 
 ## 仓库与验证
 
@@ -52,6 +62,6 @@ python3 -m unittest discover -s tests -v
 bash build.sh
 ```
 
-打包结果为 `dist/context-keeper-skill-0.4.0.zip`，解压后可脱离源码仓库安装。
+打包结果为 `dist/context-keeper-skill-0.5.0.zip`，解压后可脱离源码仓库安装。
 
 [Skill 指令](skills/context-keeper/SKILL.md) · [安装参数](skills/context-keeper/INSTALL.md) · [命令参考](skills/context-keeper/references/commands.md) · [MIT License](LICENSE)

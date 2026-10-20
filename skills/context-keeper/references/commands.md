@@ -1,6 +1,6 @@
 # Contracts and commands
 
-Use Python 3.9+ with standard library only. All operations are local. The argument order is:
+Use Python 3.9+ with standard library only. All commands operate on local files; Git transports explicitly shared memory. The argument order is:
 
 ```sh
 python3 "<skill-dir>/scripts/ck.py" --workspace "<project>" <command> [options]
@@ -8,7 +8,7 @@ python3 "<skill-dir>/scripts/ck.py" --workspace "<project>" <command> [options]
 
 ## Project and tasks
 
-- `init [--name NAME] [--project-id UUID]`: create `.context-keeper/project.json`, local ignore rules and a readable index. Does not change the parent Git ignore/config or install anything.
+- `init [--name NAME] [--project-id UUID]`: create `.context-keeper/project.json`, local ignore rules and a readable index. Reuses an existing project UUID, updates managed project ignore rules, and installs/commits nothing.
 - `status`: list tasks/revisions and experience status. Does not initialize a missing project.
 - `inspect`: read current Git fingerprint without writing task data.
 - `save --input FILE [--task ID]`: validate and save a checkpoint. `--input -` accepts JSON from stdin. A new task ID is derived from project identity plus the initial idempotency key, so an identical initial retry does not create a second task.
@@ -75,7 +75,7 @@ Experience: `.context-keeper/experiences/ID/versions/000001/experience.json` and
 
 Do not edit checksummed immutable records. Reuse identical save/proposal input after an interrupted write; publication can repair a committed revision whose pointer was not updated. If an orphan belongs to different input, preserve it for diagnosis rather than overwriting it. A checksum detects accidental edits; it is not an authenticity signature.
 
-Saved data is ignored by default. Sharing is explicit. Exports contain task history; older summaries may contain sensitive context even when the latest one is short. Already shared files cannot be revoked by modifying the local project. Missing experience evidence from another task must be treated as unavailable, not silently inferred.
+Task/experience state is ignored locally. Project identity and ignore rules are Git candidates; `share` deliberately publishes immutable Git candidates. Sharing is explicit. Exports contain task history; older summaries may contain sensitive context even when the latest one is short. Already shared files cannot be revoked by modifying the local project. Missing experience evidence from another task must be treated as unavailable, not silently inferred.
 
 ## Team merge (0.4.0)
 
@@ -89,3 +89,15 @@ See [merge.md](merge.md) for project identity, examples, conflict granularity, s
 - `status.pending_merges`: incomplete transactions that must be recovered before saving/remembering/exporting.
 
 Task/experience records may include `parents` hashes and `merge` provenance. Original branch records are retained in `objects/HASH.json`; transaction and receipt are in `merges/PLAN/`. Do not edit these files. Older schema-1 records remain readable; conservative conflicts are reported when legacy data lacks a unique common ancestor.
+
+## Repository-carried memory (0.5.0)
+
+Read [git-sharing.md](git-sharing.md) for Git bootstrap, privacy, ID allocation and recovery.
+
+- `new-task --title TITLE --goal GOAL [--request-id UNIQUE_KEY]`: create a task with an automatically assigned UUID. A fresh random key is used if omitted; retain an explicit key for retry-safe creation. Continue work with the returned ID via `draft`/`save`.
+- `share (--task ID | --all)`: publish selected local history as immutable `shared/objects` and `shared/heads` JSON. Returns Git paths for review; never stages, commits or pushes.
+- `status.shared`: discover repository-carried tasks/experience, heads, forks and outstanding sync work without importing them.
+- `sync [--resolutions FILE]`: preview shared histories into local state, at most one outstanding head per entity in each round.
+- `sync --apply --plan TOKEN [--resolutions FILE]`: apply a reviewed plan, or recover its exact locally cached snapshot. Repeat previews until `up_to_date`.
+
+Shared files use content hashes; local numeric checkpoints are never shared as mutable paths. `resume` flags relevant outstanding shared heads and `recall` withholds active experience requiring shared reconciliation. Existing local histories and ZIP commands remain supported.

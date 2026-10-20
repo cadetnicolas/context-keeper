@@ -38,6 +38,6 @@
 
 ## 离线方式
 
-构建 `bash build.sh` 可得到 `dist/context-keeper-skill-0.4.0.zip`。包内包含独立 install.py、AGENT.md、SKILL.md、模板与脚本，离开原 Git 仓库仍可安装。
+构建 `bash build.sh` 可得到 `dist/context-keeper-skill-0.5.0.zip`。包内包含独立 install.py、AGENT.md、SKILL.md、模板与脚本，离开原 Git 仓库仍可安装。
 
 更详细的目标目录与更新参数见 [能力包安装说明](skills/context-keeper/INSTALL.md)。

@@ -79,9 +79,16 @@ def capture(root, project_id):
         except (Error, OSError):
             files.append({"path": name, "available": False, "sha256": None})
             limitations.append("Untracked file could not be hashed: " + name)
-    result = {"project_id": project_id, "mode": "git", "branch": os.fsdecode(branch).strip() if branch else "(detached)",
+    tree = git(root, "ls-tree", "-r", "-z", "HEAD", optional=True)
+    code_tree = None
+    if tree is not None:
+        entries = [entry for entry in tree.split(b"\0") if entry and
+                   entry.split(b"\t", 1)[-1] != DATA_DIR.encode() and
+                   not entry.split(b"\t", 1)[-1].startswith(DATA_DIR.encode() + b"/")]
+        code_tree = digest(b"\0".join(entries))
+    result = {"code_tree": code_tree, "project_id": project_id, "mode": "git", "branch": os.fsdecode(branch).strip() if branch else "(detached)",
               "commit": os.fsdecode(commit).strip() if commit else None, "dirty": bool(status),
               "changes_sha256": digest({"status": digest(status), "staged": digest(staged),
                                         "unstaged": digest(unstaged), "untracked": files}), "limitations": limitations}
-    result["fingerprint"] = digest({key: result[key] for key in ("branch", "commit", "changes_sha256")})
+    result["fingerprint"] = digest({key: result[key] for key in ("branch", "code_tree", "changes_sha256")})
     return result

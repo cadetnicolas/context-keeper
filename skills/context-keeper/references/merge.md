@@ -1,10 +1,10 @@
 # Distributed context merge
 
-The skill is installed per agent. Each checkout stores its own project context in `.context-keeper/`. Exchange explicit context export ZIPs; no server or shared writable directory is required. Code changes still travel through Git and its normal review/merge workflow.
+The skill is installed per agent. Each checkout stores its own project context in `.context-keeper/`. Prefer [Git sharing](git-sharing.md) for routine collaboration; explicit ZIP exchange remains available offline. No server or shared writable directory is required. Code changes still travel through Git and its normal review/merge workflow.
 
 ## Establish the same project identity
 
-Before parallel development, run `init` once and deliberately share `.context-keeper/project.json`, or have teammates initialize with its UUID:
+Normally run `init` once and commit the generated project identity and ignore rules; teammates clone that identity. For offline/manual compatibility, deliberately share `.context-keeper/project.json` or initialize a fresh checkout with its UUID:
 
 ```sh
 python3 "<skill-dir>/scripts/ck.py" --workspace "<alice-project>" init

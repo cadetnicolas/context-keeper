@@ -58,7 +58,7 @@ class SkillTests(unittest.TestCase):
         self.assertTrue(Path(saved['handoff']).is_file())
         self.assertIn('保留旧字段', Path(saved['handoff']).read_text())
         self.assertEqual(self.keeper.status()['tasks'][0]['id'], 'login')
-        ignored = run_git(self.root, 'check-ignore', '.context-keeper/project.json')
+        ignored = run_git(self.root, 'check-ignore', '.context-keeper/tasks/login/meta.json')
         self.assertTrue(ignored.stdout)
 
     def test_metadata_changes_do_not_change_code_fingerprint(self):
@@ -170,6 +170,8 @@ class SkillTests(unittest.TestCase):
             self.keeper.remember(self.experience(key='global',scope='user'))
 
     def test_export_clone_roundtrip_no_unrelated_tasks_or_code(self):
+        run_git(self.root, 'add', '.gitignore')
+        run_git(self.root, '-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-m', 'ignore local context')
         self.keeper.save(self.task(),'login')
         self.keeper.save(self.task(key='private',title='unrelated-private-task'),'other')
         archive=self.base/'handoff.zip'
