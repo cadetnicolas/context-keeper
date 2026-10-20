@@ -8,14 +8,14 @@ python3 "<skill-dir>/scripts/ck.py" --workspace "<project>" <command> [options]
 
 ## Project and tasks
 
-- `init [--name NAME]`: create `.context-keeper/project.json`, local ignore rules and a readable index. Does not change the parent Git ignore/config or install anything.
+- `init [--name NAME] [--project-id UUID]`: create `.context-keeper/project.json`, local ignore rules and a readable index. Does not change the parent Git ignore/config or install anything.
 - `status`: list tasks/revisions and experience status. Does not initialize a missing project.
 - `inspect`: read current Git fingerprint without writing task data.
 - `save --input FILE [--task ID]`: validate and save a checkpoint. `--input -` accepts JSON from stdin. A new task ID is derived from project identity plus the initial idempotency key, so an identical initial retry does not create a second task.
 - `show --task ID [--revision N]`: read full authoritative checkpoint JSON.
 - `draft --task ID`: produce a valid next-save input, preserving prior evidence and removing computed fields; edit the result and save it with the same task ID.
 - `resume --task ID [--revision N]`: read-only comparison; returns `context_checked` or `partial`, differences, missing files and old checks to rerun.
-- `export --task ID --output NEW.zip`: create an archive outside the context directory. Existing output is never overwritten. The archive does not contain source code.
+- `export (--task ID | --all) --output NEW.zip`: create an archive outside the context directory. Existing output is never overwritten. The archive does not contain source code.
 
 For a new task, use the bundled checkpoint template. For an update, use `draft --task ID` and edit that valid input. It retains evidence referenced by existing claims, removes computed fields, and supplies the next version and a fresh key. Do not feed the entire `show` envelope back to save.
 
@@ -76,3 +76,16 @@ Experience: `.context-keeper/experiences/ID/versions/000001/experience.json` and
 Do not edit checksummed immutable records. Reuse identical save/proposal input after an interrupted write; publication can repair a committed revision whose pointer was not updated. If an orphan belongs to different input, preserve it for diagnosis rather than overwriting it. A checksum detects accidental edits; it is not an authenticity signature.
 
 Saved data is ignored by default. Sharing is explicit. Exports contain task history; older summaries may contain sensitive context even when the latest one is short. Already shared files cannot be revoked by modifying the local project. Missing experience evidence from another task must be treated as unavailable, not silently inferred.
+
+## Team merge (0.4.0)
+
+See [merge.md](merge.md) for project identity, examples, conflict granularity, source history and crash recovery.
+
+- `init --project-id UUID`: initialize a teammate checkout with the shared identity before creating history. Existing different identities are not overwritten.
+- `export --all --output NEW.zip`: explicitly share every task and experience, including reachable merge provenance. The single-task export remains available.
+- `merge --source FILE.zip`: preview imports, fast-forwards, three-way field merges and unresolved conflicts. Never extracts source files into the project.
+- `merge --source FILE.zip --resolutions FILE.json`: preview with per-conflict `{ "take": "local" }` or `{ "take": "incoming" }` choices.
+- `merge --source FILE.zip --apply --plan TOKEN [--resolutions FILE.json]`: apply a current, fully resolved plan; retry exactly this command after interruption.
+- `status.pending_merges`: incomplete transactions that must be recovered before saving/remembering/exporting.
+
+Task/experience records may include `parents` hashes and `merge` provenance. Original branch records are retained in `objects/HASH.json`; transaction and receipt are in `merges/PLAN/`. Do not edit these files. Older schema-1 records remain readable; conservative conflicts are reported when legacy data lacks a unique common ancestor.

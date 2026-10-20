@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 DATA_DIR = ".context-keeper"
 SCHEMA = 1
 SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")

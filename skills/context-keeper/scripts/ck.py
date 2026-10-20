@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ContextKeeper 0.3.1: skill-first project continuity, no server or third-party packages."""
+"""ContextKeeper 0.4.0: skill-first project continuity, no server or third-party packages."""
 import argparse
 import json
 import os
@@ -157,11 +157,16 @@ class Keeper:
             raise Error("Unsupported project metadata.")
         return config
 
-    def init(self, name=None):
+    def init(self, name=None, project_id=None):
+        if project_id is not None:
+            from uuid import UUID
+            project_id = str(UUID(project_id))
         with lock(self.directory):
             path = self.path("project.json")
+            if path.exists() and project_id and self.project()["project_id"] != project_id:
+                raise Error("Project already initialized with a different identity; do not relabel histories.")
             if not path.exists():
-                atomic_write(path, {"schema_version": SCHEMA, "project_id": str(uuid4()), "name": redact(name or self.root.name),
+                atomic_write(path, {"schema_version": SCHEMA, "project_id": project_id or str(uuid4()), "name": redact(name or self.root.name),
                                     "created_at": now(), "version": VERSION})
             ignore = self.path(".gitignore")
             if not ignore.exists():
@@ -218,7 +223,8 @@ class Keeper:
         if not self.path("project.json").exists():
             return {"initialized": False, "workspace": str(self.root), "next": "init"}
         project = self.project()
-        return {"initialized": True, "version": VERSION, "project": project, "index": str(self.path("INDEX.md")),
+        from _merge import pending
+        return {"pending_merges": pending(self), "initialized": True, "version": VERSION, "project": project, "index": str(self.path("INDEX.md")),
                 "tasks": [{"id": item["task_id"], "title": item["state"]["title"], "revision": item["revision"],
                            "status": item["state"]["status"], "handoff": str(self.path("tasks", item["task_id"], "HANDOFF.md"))}
                           for item in self.entries("tasks")],
@@ -296,6 +302,8 @@ class Keeper:
         request_hash = digest(data)
         task_id = identity(task_id) if task_id else str(uuid5(NAMESPACE_URL, project["project_id"] + ":task:" + data["idempotency_key"]))
         with lock(self.directory):
+            from _merge import ensure_ready
+            ensure_ready(self)
             prior = self.find_request("tasks", task_id, data["idempotency_key"], request_hash)
             if prior:
                 return self.saved(self.recover_retry("tasks", task_id, prior), retry=True)
@@ -330,6 +338,7 @@ class Keeper:
             record = seal({"schema_version": SCHEMA, "version": VERSION, "project_id": project["project_id"],
                            "task_id": task_id, "revision": revision + 1, "created_at": now(),
                            "request_key": data["idempotency_key"], "request_hash": request_hash,
+                           "parents": [digest(previous)] if previous else [],
                            "original_goal": previous["original_goal"] if previous else cleaned["goal"],
                            "state": {key: value for key, value in cleaned.items() if key not in ("idempotency_key", "expected_revision", "artifact_paths")},
                            "workspace": before, "artifacts": artifacts, "warnings": warnings})
@@ -378,6 +387,11 @@ class Keeper:
         after = self.inspect()
         if current["fingerprint"] != after["fingerprint"]:
             mismatches.append({"field": "workspace_changed_during_inspection"})
+        from _merge import pending
+        if record.get("merge"):
+            mismatches.append({"field": "merged_context", "note": "Reconcile parallel work, then save a new checkpoint after checking code."})
+        if pending(self):
+            mismatches.append({"field": "pending_merge", "plans": pending(self)})
         limited = current["mode"] != "git" or current["limitations"] or record["workspace"]["limitations"]
         return {"status": "partial" if mismatches or missing or limited else "context_checked", "task_id": task_id,
                 "revision": record["revision"], "mismatches": mismatches, "missing": missing,
@@ -394,6 +408,8 @@ class Keeper:
         request_hash = digest(data)
         experience_id = identity(experience_id) if experience_id else str(uuid5(NAMESPACE_URL, project["project_id"] + ":experience:" + data["idempotency_key"]))
         with lock(self.directory):
+            from _merge import ensure_ready
+            ensure_ready(self)
             prior = self.find_request("experiences", experience_id, data["idempotency_key"], request_hash)
             if prior:
                 return self.recover_retry("experiences", experience_id, prior)
@@ -413,7 +429,7 @@ class Keeper:
                 if data["scope"] == "task" and ref["task_id"] != data["task_id"]:
                     raise Error("Task experience cannot cite a different task.")
             record = seal({"schema_version": SCHEMA, "version": VERSION, "project_id": project["project_id"],
-                           "id": experience_id, "revision": revision + 1, "status": "proposed", "created_at": now(),
+                           "id": experience_id, "parents": [digest(previous)] if previous else [], "revision": revision + 1, "status": "proposed", "created_at": now(),
                            "request_key": data["idempotency_key"], "request_hash": request_hash,
                            **{key: value for key, value in redact(data).items() if key not in ("idempotency_key", "expected_version")}})
             self.publish("experiences", experience_id, record)
@@ -424,11 +440,13 @@ class Keeper:
             raise Error("Unsupported experience state.")
         text(note, "confirmation/correction note")
         with lock(self.directory):
+            from _merge import ensure_ready
+            ensure_ready(self)
             previous = self.record("experiences", experience_id)
             if previous["revision"] != expected_version:
                 raise Error("Experience version changed; reload before updating its state.")
             record = seal({**{key: value for key, value in previous.items() if key != "integrity"},
-                           "revision": expected_version + 1, "created_at": now(), "status": status,
+                           "revision": expected_version + 1, "created_at": now(), "status": status, "parents": [digest(previous)],
                            "note": redact(note), "confirmation": "user-directed; source facts not independently verified",
                            "request_key": str(uuid4()), "request_hash": digest({"status": status, "note": note, "expected_version": expected_version})})
             self.publish("experiences", experience_id, record)
@@ -452,6 +470,10 @@ class Keeper:
                 results.append({**item, "score": score, "why": "active scoped preference" if item["kind"] == "preference" else "active scope + lexical overlap"})
         return sorted(results, key=lambda item: (item["kind"] == "preference", item["score"]), reverse=True)[:limit]
 
+    def merge(self, source, apply=False, expected_plan=None, resolutions=None):
+        from _merge import merge
+        return merge(self, source, apply, expected_plan, resolutions)
+
     def export(self, task_id, output):
         output = Path(output).expanduser().absolute()
         try:
@@ -462,14 +484,19 @@ class Keeper:
         with lock(self.directory):
             if output.is_symlink() or output.exists():
                 raise Error("Export destination already exists; choose a new filename.")
-            current = self.record("tasks", task_id)
+            from _merge import ensure_ready, objects
+            ensure_ready(self)
+            selected = [self.record("tasks", task_id)] if task_id else self.entries("tasks")
             members = {DATA_DIR + "/project.json": self.path("project.json")}
-            prefixes = [("tasks", task_id)]
-            # Only this task and experiences actually referenced by its checkpoints.
+            prefixes = [("tasks", item["task_id"]) for item in selected]
+            # Selected tasks and referenced experience; --all explicitly includes every card.
             refs = set()
-            for revision in range(1, current["revision"] + 1):
-                item = self.record("tasks", task_id, revision)
-                refs.update(ref["id"] for ref in item["state"]["experience_refs"])
+            for current in selected:
+                for revision in range(1, current["revision"] + 1):
+                    item = self.record("tasks", current["task_id"], revision)
+                    refs.update(ref["id"] for ref in item["state"]["experience_refs"])
+            if task_id is None:
+                refs.update(item["id"] for item in self.entries("experiences"))
             prefixes.extend(("experiences", experience_id) for experience_id in sorted(refs))
             for category, item_id in prefixes:
                 directory = self.path(category, item_id)
@@ -479,9 +506,25 @@ class Keeper:
                     if path.is_file() and not any(part.startswith(".") for part in path.relative_to(directory).parts):
                         relative = path.relative_to(self.directory)
                         members[DATA_DIR + "/" + relative.as_posix()] = path
+            # Export only objects reachable from selected histories, preserving fork provenance.
+            pool = objects(self)
+            needed = []
+            for category, item_id in prefixes:
+                head = self.record(category, item_id)
+                for revision in range(1, head["revision"] + 1):
+                    needed.extend(self.record(category, item_id, revision).get("parents", []))
+            visited = set()
+            while needed:
+                object_hash = needed.pop()
+                if object_hash in visited or object_hash not in pool:
+                    continue
+                visited.add(object_hash)
+                record = pool[object_hash]
+                members[DATA_DIR + "/objects/" + object_hash + ".json"] = self.path("objects", object_hash + ".json")
+                needed.extend(record.get("parents", []))
             index = ("# ContextKeeper · 任务交接\n\n"
-                     "任务入口：[HANDOFF.md](tasks/%s/HANDOFF.md)。\n\n"
-                     "先运行 Skill 的 resume 核对代码工作区，再继续。经验通过 recall 按当前状态读取。\n" % task_id)
+                     "任务入口：查看 tasks 下各任务的 HANDOFF.md。所选任务：%s。\n\n"
+                     "先运行 Skill 的 resume 核对代码工作区，再继续。经验通过 recall 按当前状态读取。\n" % (task_id or "all project tasks"))
             created = False
             try:
                 with output.open("xb") as destination:
@@ -496,16 +539,17 @@ class Keeper:
                     output.unlink()
                 raise
         return {"output": str(output), "task_id": task_id, "contains_code": False,
-                "note": "Includes this task's history and referenced experiences. Review before sharing; external copies cannot be recalled."}
+                "note": "Includes selected task histories and referenced experience, or all project context with --all. Review before sharing; external copies cannot be recalled."}
 
 
 def parser():
-    root = argparse.ArgumentParser(description="ContextKeeper 0.3.1 · Skill + project files; no server")
+    root = argparse.ArgumentParser(description="ContextKeeper 0.4.0 · Skill + project files; no server")
     root.add_argument("--workspace", default=".", help="Workspace (Git root is detected)")
     root.add_argument("--version", action="version", version=VERSION)
     commands = root.add_subparsers(dest="command", required=True)
     initialize = commands.add_parser("init")
     initialize.add_argument("--name")
+    initialize.add_argument("--project-id", help="Shared project UUID, set before parallel work")
     commands.add_parser("status")
     commands.add_parser("inspect")
     for name in ("save", "remember"):
@@ -527,8 +571,15 @@ def parser():
     state.add_argument("--expected-version", required=True, type=int)
     state.add_argument("--note", required=True)
     export = commands.add_parser("export")
-    export.add_argument("--task", required=True)
+    selection = export.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--task")
+    selection.add_argument("--all", action="store_true", help="Explicitly export all project tasks and experiences")
     export.add_argument("--output", required=True)
+    merge = commands.add_parser("merge")
+    merge.add_argument("--source", required=True, help="Context export ZIP from the same project")
+    merge.add_argument("--apply", action="store_true", help="Apply a reviewed plan; otherwise preview only")
+    merge.add_argument("--plan", help="Preview plan token, required for apply")
+    merge.add_argument("--resolutions", help="JSON object mapping conflict IDs to {take:local|incoming}")
     return root
 
 
@@ -537,7 +588,7 @@ def main(argv=None):
     try:
         keeper = Keeper(args.workspace)
         if args.command == "init":
-            result = keeper.init(args.name)
+            result = keeper.init(args.name, args.project_id)
         elif args.command == "status":
             result = keeper.status()
         elif args.command == "inspect":
@@ -563,6 +614,9 @@ def main(argv=None):
             result = keeper.recall(args.query, args.task, args.limit)
         elif args.command == "experience-state":
             result = keeper.experience_state(args.id, args.status, args.expected_version, args.note)
+        elif args.command == "merge":
+            resolutions = read_json(args.resolutions) if args.resolutions else None
+            result = keeper.merge(args.source, args.apply, args.plan, resolutions)
         elif args.command == "export":
             result = keeper.export(args.task, args.output)
         print(json.dumps(result, ensure_ascii=False, indent=2))

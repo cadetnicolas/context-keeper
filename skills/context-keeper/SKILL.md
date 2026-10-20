@@ -1,9 +1,9 @@
 ---
 name: context-keeper
-description: Save or resume coding-project work across agents or sessions, prepare a task handoff, and remember or correct project collaboration preferences. Use when the user asks to preserve progress, switch agents, recover project context, or carry forward lessons; not for ordinary coding without a continuity request.
+description: Save or resume coding-project work across agents or sessions, prepare a task handoff, and remember or correct project collaboration preferences. Use when the user asks to preserve progress, switch agents, recover project context, carry forward lessons, or merge team project context and resolve conflicts; not for ordinary coding without a continuity request.
 license: MIT
 metadata:
-  version: "0.3.1"
+  version: "0.4.0"
 ---
 
 # ContextKeeper
@@ -49,6 +49,14 @@ For a correction, read the current version, then `remember --experience <id> --i
 Use `export --task <id> --output <new-file.zip>` only when the user wants a portable package. It includes that task's history and referenced experience; it does not transfer source code or unrelated tasks. Review sensitive content before sharing. This command only creates a local archive; it never sends or uploads it.
 
 Bring the code workspace and the archive's `.context-keeper/` directory to the destination. Preserve its project metadata, then run `resume` there. In another agent without skill support, point it to `.context-keeper/INDEX.md` and the relevant `HANDOFF.md`; it can read the files and manually verify differences. Skill installation does not automatically give another agent access to files.
+
+## Merge team context / resolve conflicts
+
+Read [references/merge.md](references/merge.md) for distributed development. Establish a shared project UUID before parallel work; use distinct task IDs for independent work. Exchange explicit task exports or `export --all` ZIPs. Do not merge by copying over another `.context-keeper/` directory.
+
+Run `merge --source <zip>` to preview. Review source changes and field conflicts with the user, using existing instructions to resolve routine choices when they are clear. Record explicit `local`/`incoming` choices for unresolved conflicts; do not assume timestamps establish authority. Apply with the current `--plan` token and optional `--resolutions` JSON. Preserve original histories, then reconcile code and use `resume` and a subsequent `draft`/`save` checkpoint to record verified current progress. A conflict-free structural merge cannot prove agreement across independently named tasks. Merged experience content is proposed until reconfirmed.
+
+If `status.pending_merges` is nonempty, retry that original merge transaction before further writes or exports. Do not remove its recovery files or claim the entire merge was atomic.
 
 ## Operational boundaries
 
